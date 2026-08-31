@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-SRT 白板动画 - 整合渲染器（mask 编排 + stream 画法）
+SRT 화이트보드 애니메이션 - 통합 렌더러 (영역 편성 + 연속 펜선)
 
-把一张线稿图 + 同名 annotation.json 渲染成白板手绘动画：
-  - 编排沿用 whiteboard-mask-animation：按 sequence/startMs 顺序逐区域揭示，
-    每个区域的可作画范围 = 矩形 region 扣除「后续区域 + protectedRegions」，
-    未开始的区域因掩码限制不会提前露线（mask 的核心不变量）。
-  - 画法换成 whiteboard-stream-animation：每个区域在自己的允许掩码内，
-    沿骨架/网格笔迹连续落墨（起笔 ink → 添彩 color），笔尖跟随真实笔迹，
-    所有区域共享同一张持久画布，已画完的区域保留在画布上。
+선화 이미지 한 장 + 같은 이름의 annotation.json 을 화이트보드 손그림 애니메이션으로 렌더한다:
+  - 편성: sequence/startMs 순서대로 영역을 하나씩 드러낸다.
+    영역마다 그릴 수 있는 범위 = 사각형 region - (후속 영역 + protectedRegions).
+    시작 전 영역은 마스크에 막혀 미리 드러나지 않는다 (마스크의 핵심 불변식).
+  - 그리는 법: 각 영역이 자기 허용 마스크 안에서
+    골격/격자 경로를 따라 연속으로 먹을 놓는다 (선 ink -> 채색 color). 펜끝이 실제 펜선을 따라간다.
+    모든 영역이 같은 캔버스를 공유하고, 다 그린 영역은 캔버스에 남는다.
 
-与 mask 的矩形擦除揭示不同：这里是「笔尖沿线滑行、边走边落墨」的连贯笔迹。
-输出末行打印 OUTPUT=<路径>，便于上层捕获。
+사각형으로 지워내는 방식과 다르다. 펜끝이 선을 따라 미끄러지며 먹을 놓는 이어진 펜선이다.
+마지막 줄에 OUTPUT=<경로> 를 찍어 호출하는 쪽이 받아 쓰게 한다.
 
-用法：
-  <ENV_PY> render_stream_whiteboard.py <图片> <标注json> <输出mp4> [手部素材png]
-  可选参数见 --help（--ink-path / --color-fill / --pause / --total-ms 等）。
-  --total-ms 缺省时用标注里的 sceneDurationMs。
+사용법:
+  <ENV_PY> render_stream_whiteboard.py <이미지> <주석json> <출력mp4> [손이미지png]
+  선택 인자는 --help 참고 (--ink-path / --color-fill / --pause / --total-ms 등).
+  --total-ms 를 안 주면 주석의 sceneDurationMs 를 쓴다.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-# 复用 stream 渲染器的全部构件（同目录）
+# 같은 폴더의 stream 렌더러 부품을 그대로 재사용
 _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 import stream_render as sr  # noqa: E402
@@ -39,7 +39,7 @@ DEFAULT_HAND = _SCRIPT_DIR.parent / "assets" / "drawing-hand.png"
 
 
 # ──────────────────────────────────────────────────────────────
-# 区域几何：把标注画布坐标缩放到输出尺寸
+# 영역 기하: 주석 캔버스 좌표를 출력 크기로 환산
 # ──────────────────────────────────────────────────────────────
 def _scaled_rect(region: dict, sx: float, sy: float, out_w: int, out_h: int) -> tuple[int, int, int, int]:
     x0 = int(round(region["x"] * sx))
@@ -54,7 +54,7 @@ def _scaled_rect(region: dict, sx: float, sy: float, out_w: int, out_h: int) -> 
 
 
 def _frame_progress_indices(n_steps: int, target_frames: int) -> list[int]:
-    """把 n_steps 个笔尖位置均匀映射到 target_frames 帧。"""
+    """펜끝 위치 n_steps 개를 target_frames 프레임에 고르게 배분한다."""
     if n_steps == 0 or target_frames <= 0:
         return []
     if target_frames == 1:
@@ -63,10 +63,10 @@ def _frame_progress_indices(n_steps: int, target_frames: int) -> list[int]:
 
 
 # ──────────────────────────────────────────────────────────────
-# 每区域的 stream 笔迹渲染，写入共享持久画布
+# 영역마다 연속 펜선을 그려 공유 캔버스에 쓴다
 # ──────────────────────────────────────────────────────────────
 class RegionStreamRenderer:
-    """持有整段渲染的共享状态；逐区域把 stream 笔迹画进同一张画布。"""
+    """렌더 전체의 공유 상태를 들고, 영역마다 연속 펜선을 같은 캔버스에 그린다."""
 
     def __init__(self, image_bgr: np.ndarray, annotation: dict, cfg: sr.Config,
                  hand_png: Path | None, bare_tip: bool) -> None:
@@ -74,7 +74,7 @@ class RegionStreamRenderer:
         self.ann = annotation
         self.canvas_bgr = sr._hex_to_bgr(cfg.canvas_hex)
 
-        # 输出尺寸：长边限到 cap，对齐到 grid_edge 的偶数倍（编码要求偶数）
+        # 출력 크기: 긴 변을 cap 으로 제한하고 grid_edge 의 짝수 배로 맞춘다 (인코딩이 짝수를 요구)
         h0, w0 = image_bgr.shape[:2]
         scale = cfg.cap_long_edge / max(h0, w0)
         align = cfg.grid_edge if cfg.grid_edge % 2 == 0 else cfg.grid_edge * 2
@@ -82,7 +82,7 @@ class RegionStreamRenderer:
         h = max(align, (int(round(h0 * scale)) // align) * align)
         self.out_w, self.out_h = w, h
 
-        # 标注画布坐标 → 输出坐标的缩放比
+        # 주석 캔버스 좌표 -> 출력 좌표 환산 비율
         cw = annotation["canvas"]["width"]
         ch = annotation["canvas"]["height"]
         self.sx = self.out_w / cw
@@ -98,15 +98,15 @@ class RegionStreamRenderer:
         self.ink_pixels = self.thresh_map < cfg.ink_threshold
         self.ink_paint = np.repeat(self.thresh_map[:, :, None], 3, axis=2).astype(np.float32)
 
-        # 背景染成画布底色，让上色阶段背景与起笔一致（不碰墨迹）
+        # 배경을 캔버스 바탕색으로 물들여 채색 단계와 선 단계의 배경을 맞춘다 (먹선은 안 건드림)
         if cfg.match_bg:
             self._match_original_background()
 
-        # 共享持久画布
+        # 공유 캔버스
         self.drawn = np.empty((self.out_h, self.out_w, 3), dtype=np.float32)
         self.drawn[...] = self.canvas_bgr.astype(np.float32)
 
-        # 笔尖覆盖
+        # 펜끝 오버레이
         self.tip: sr.TipOverlay | None = None
         if not bare_tip:
             hand_data = sr._load_hand(hand_png, cfg.target_hand_height) if hand_png else None
@@ -116,7 +116,7 @@ class RegionStreamRenderer:
                 ax, ay = 0.5, 0.70
             self.tip = sr.TipOverlay(hand_data[0], hand_data[1], tip_anchor_x=ax, tip_anchor_y=ay)
 
-    # 采样原图四角，把接近背景色的像素替换为画布底色
+    # 원본 네 귀퉁이를 떠서 배경색에 가까운 픽셀을 캔버스 바탕색으로 바꾼다
     def _match_original_background(self) -> None:
         img = self.color_img
         h, w = img.shape[:2]
@@ -138,7 +138,7 @@ class RegionStreamRenderer:
             self.tip.stamp(snap, px, py)
         return snap
 
-    # ── 单区域的允许掩码：矩形 - 后续区域 - protectedRegions ──
+    # -- 영역의 허용 마스크: 사각형 - 후속 영역 - protectedRegions --
     def _allowed_mask(self, element: dict, later_elements: list[dict]) -> np.ndarray:
         mask = np.zeros((self.out_h, self.out_w), dtype=bool)
         x0, y0, x1, y1 = _scaled_rect(element["region"], self.sx, self.sy, self.out_w, self.out_h)
@@ -151,9 +151,9 @@ class RegionStreamRenderer:
             mask[py0:py1, px0:px1] = False
         return mask
 
-    # ── 区域内笔迹路径 ──
+    # -- 영역 안의 펜선 경로 --
     def _region_grid_path(self, allowed: np.ndarray) -> list[tuple[int, int]]:
-        """网格模式：把区域内含墨的格聚类并串成连续格路径。"""
+        """격자 모드: 영역 안에서 먹이 있는 칸을 묶어 연속된 칸 경로로 잇는다."""
         allowed_u8 = allowed.astype(np.uint8)
         allowed_cell = sr._to_grid_blocks(allowed_u8, self.cfg.grid_edge).any(axis=(2, 3))
         active = self.active_all & allowed_cell
@@ -163,7 +163,7 @@ class RegionStreamRenderer:
         return sr.flatten_streams(streams)
 
     def _region_skeleton_strokes(self, allowed: np.ndarray) -> list[list[tuple[int, int]]]:
-        """骨架模式：区域内墨迹细化 + 8 邻接追踪 + 重采样平滑。"""
+        """골격 모드: 영역 안 먹선 세선화 + 8이웃 추적 + 재샘플링 평활."""
         cfg = self.cfg
         region_ink = self.ink_pixels & allowed
         if not region_ink.any():
@@ -183,7 +183,7 @@ class RegionStreamRenderer:
                 out.append([(int(round(x)), int(round(y))) for x, y in pts])
         return sr._order_skeleton_strokes(out)
 
-    # ── 落墨（限制在 allowed 内）──
+    # -- 먹 놓기 (allowed 안으로 제한) --
     def _reveal_ink_segment(self, a: tuple[int, int], b: tuple[int, int], allowed: np.ndarray) -> None:
         seg = np.zeros((self.out_h, self.out_w), dtype=np.uint8)
         thick = max(1, self.cfg.ink_reveal_radius * 2 + 1)
@@ -217,7 +217,7 @@ class RegionStreamRenderer:
         for ch in range(3):
             target[:, :, ch] = target[:, :, ch] * inv + source[:, :, ch] * m
 
-    # ── 起笔段（骨架模式）：沿笔迹逐段揭原图墨迹，无块填充 ──
+    # -- 선 긋기 단계(골격 모드): 펜선을 따라 원본 먹선을 구간별로 드러낸다. 칸 채우기 없음 --
     def _lay_ink(self, writer, frames: int, samples: list[tuple[int, int]],
                  pen_lifts: set[int], allowed: np.ndarray) -> None:
         if frames <= 0:
@@ -241,7 +241,7 @@ class RegionStreamRenderer:
             writer.write(self._snapshot_with_tip(sx, sy))
             last = si
 
-    # ── 添彩段：brush 或 contour-wipe，限制在 allowed 内 ──
+    # -- 채색 단계: brush 또는 contour-wipe. allowed 안으로 제한 --
     def _wash_brush(self, writer, frames: int, centers: list[tuple[int, int]], allowed: np.ndarray) -> None:
         if frames <= 0:
             return
@@ -275,7 +275,7 @@ class RegionStreamRenderer:
         region_h = bottom - top + 1
         region_w = right - left + 1
 
-        # 区域内的阻力场（墨线膨胀 + 模糊 + 逐行向下衰减）
+        # 영역 안의 저항장 (먹선 팽창 + 블러 + 행별 아래쪽 감쇠)
         ink_u8 = ((self.ink_pixels & allowed)[top:bottom + 1, left:right + 1].astype(np.uint8)) * 255
         spread = int(np.clip(min(region_w, region_h) // 32, 3, 17))
         if spread % 2 == 0:
@@ -317,10 +317,10 @@ class RegionStreamRenderer:
             cy = int(col[-1]) if col.size > 0 else 0
             writer.write(self._snapshot_with_tip(left + cx, top + cy))
 
-        # 收尾：确保区域内允许像素全部揭示
+        # 마무리: 영역 안 허용 픽셀이 전부 드러나게 한다
         drawn_crop[allowed_crop] = color_crop[allowed_crop]
 
-    # ── 网格路径的采样计划（插值 + 抬笔 + 块填充索引）──
+    # -- 격자 경로 샘플 계획 (보간 + 펜 들기 + 칸 채우기 인덱스) --
     def _grid_plan(self, path: list[tuple[int, int]]):
         samples: list[tuple[int, int]] = []
         pen_lifts: set[int] = set()
@@ -345,14 +345,14 @@ class RegionStreamRenderer:
                 sample_cell.append(idx)
         return samples, pen_lifts, sample_cell
 
-    # ── 主渲染 ──
+    # -- 메인 렌더 --
     def render_to(self, raw_path: Path, total_ms: int) -> Path:
         cfg = self.cfg
         elements = sorted(self.ann["elements"], key=lambda e: e["reveal"]["startMs"])
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(str(raw_path), fourcc, cfg.fps, (self.out_w, self.out_h))
         if not writer.isOpened():
-            raise RuntimeError("无法打开视频写入器")
+            raise RuntimeError("영상 파일을 열 수 없습니다")
 
         weight_sum = cfg.ink_weight + cfg.color_weight
         cur_ms = 0.0
@@ -398,11 +398,11 @@ class RegionStreamRenderer:
                     path = self._region_grid_path(allowed)
                     if path:
                         samples, pen_lifts, sample_cell = self._grid_plan(path)
-                        # 块填充：随笔尖推进逐格铺满（保证文字/大块实心）
+                        # 칸 채우기: 펜끝이 나아가며 칸을 채운다 (글자·큰 덩어리를 꽉 차게)
                         self._lay_ink_grid(writer, ink_frames, samples, pen_lifts, sample_cell, path, allowed)
                         centers = [self._cell_center(c) for c in path]
                     else:
-                        self._lay_ink(writer, ink_frames, [], set(), None, allowed)
+                        self._lay_ink(writer, ink_frames, [], set(), allowed)
                         centers = []
 
                 cur_ms += ink_frames * ms_per_frame
@@ -413,16 +413,16 @@ class RegionStreamRenderer:
                     self._wash_brush(writer, color_frames, centers, allowed)
                 cur_ms += color_frames * ms_per_frame
 
-            # 凝视：补到 total_ms，并确保结尾至少停留 0.5s 完整原图
+            # 바라보기: total_ms 까지 채우고, 끝에 완성 원본을 최소 0.5초 남긴다
             gaze_until = max(total_ms, cur_ms + 500)
-            # 最终帧显示完整原图（凝视）
+            # 마지막 프레임은 완성된 원본 (바라보기)
             self.drawn[...] = self.color_img.astype(np.float32)
             fill_static(gaze_until)
         finally:
             writer.release()
         return raw_path
 
-    # 网格起笔专用：带块填充，笔尖与揭墨同步
+    # 격자 선 긋기 전용: 칸 채우기 포함. 펜끝과 먹 드러내기를 동기화
     def _lay_ink_grid(self, writer, frames: int, samples, pen_lifts, sample_cell, path, allowed) -> None:
         if frames <= 0:
             return
@@ -455,24 +455,24 @@ class RegionStreamRenderer:
 
 
 def _parse_args(argv=None):
-    p = argparse.ArgumentParser(description="SRT 白板动画整合渲染器（mask 编排 + stream 画法）")
-    p.add_argument("image", help="线稿图路径")
-    p.add_argument("annotation", help="同名 annotation.json 路径")
-    p.add_argument("output", help="输出 MP4 路径")
-    p.add_argument("hand", nargs="?", default=str(DEFAULT_HAND), help="手部素材 PNG（默认内置）")
-    p.add_argument("--total-ms", type=int, default=None, help="总时长；缺省用标注 sceneDurationMs")
-    p.add_argument("--bare-tip", action="store_true", help="不叠加笔尖/手部")
+    p = argparse.ArgumentParser(description="SRT 화이트보드 애니메이션 통합 렌더러 (영역 편성 + 연속 펜선)")
+    p.add_argument("image", help="선화 이미지 경로")
+    p.add_argument("annotation", help="같은 이름의 annotation.json 경로")
+    p.add_argument("output", help="출력 MP4 경로")
+    p.add_argument("hand", nargs="?", default=str(DEFAULT_HAND), help="손 이미지 PNG (기본 내장)")
+    p.add_argument("--total-ms", type=int, default=None, help="총 길이(ms). 생략하면 주석의 sceneDurationMs 사용")
+    p.add_argument("--bare-tip", action="store_true", help="펜끝/손 오버레이 없이")
     p.add_argument("--ink-path", default="grid", choices=["grid", "skeleton"],
-                   help="笔迹路径: grid 网格(默认); skeleton 骨架追踪")
+                   help="펜선 경로: grid 격자(기본); skeleton 골격 추적")
     p.add_argument("--color-fill", default="contour-wipe", choices=["contour-wipe", "brush"],
-                   help="上色: contour-wipe 轮廓扫描(默认); brush 沿轨迹刷")
+                   help="채색: contour-wipe 윤곽 스캔(기본); brush 궤적 따라 칠하기")
     p.add_argument("--pause", default="heavy", choices=["heavy", "auto", "light", "off"],
-                   help="起笔段停顿节奏（预留，逐区域画法下影响较弱）")
+                   help="선 긋기 멈춤 리듬 (영역별 화법에서는 영향 적음)")
     p.add_argument("--fps", type=int, default=None)
     p.add_argument("--grid-edge", type=int, default=None)
     p.add_argument("--brush-radius", type=int, default=None)
     p.add_argument("--cap-long-edge", type=int, default=None,
-                   help="输出长边像素上限（预览可调小加速，默认 1080）")
+                   help="출력 긴변 픽셀 상한. ★해상도가 아니라 '긴 쪽 변' 상한입니다 (기본 1920)")
     return p.parse_args(argv)
 
 
@@ -497,20 +497,20 @@ def main(argv=None) -> int:
     cfg = _build_cfg(args)
 
     print("=" * 56)
-    print("SRT 白板动画整合渲染器 (mask 编排 + stream 画法)")
+    print("SRT 화이트보드 애니메이션 렌더러 (영역 편성 + 연속 펜선)")
     print("=" * 56)
 
     image_bgr = sr._imread_any(args.image)
     if image_bgr is None:
-        print(f"[err] 无法读取图片: {args.image}")
+        print(f"[err] 이미지를 읽을 수 없습니다: {args.image}")
         return 1
     try:
         annotation = json.loads(Path(args.annotation).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
-        print(f"[err] 无法读取标注: {e}")
+        print(f"[err] 주석 파일을 읽을 수 없습니다: {e}")
         return 1
     if not annotation.get("elements"):
-        print("[err] 标注中没有 elements")
+        print("[err] 주석에 elements 가 없습니다")
         return 1
 
     total_ms = args.total_ms if args.total_ms is not None else annotation.get("sceneDurationMs")
@@ -524,16 +524,16 @@ def main(argv=None) -> int:
 
     hand_png = Path(args.hand) if args.hand else None
     renderer = RegionStreamRenderer(image_bgr, annotation, cfg, hand_png, args.bare_tip)
-    print(f"  输入: {args.image}")
-    print(f"  输出尺寸: {renderer.out_w}x{renderer.out_h}, 帧率: {cfg.fps}")
-    print(f"  区域数: {len(annotation['elements'])}, 总时长: {total_ms}ms, "
-          f"笔迹: {cfg.ink_path_mode}, 上色: {cfg.color_fill}")
+    print(f"  입력: {args.image}")
+    print(f"  출력 크기: {renderer.out_w}x{renderer.out_h}, 프레임레이트: {cfg.fps}")
+    print(f"  영역 수: {len(annotation['elements'])}, 총 길이: {total_ms}ms, "
+          f"펜선: {cfg.ink_path_mode}, 채색: {cfg.color_fill}")
 
     renderer.render_to(raw_path, total_ms)
     final = sr.transcode_h264(raw_path, out_path)
 
     size_mb = final.stat().st_size / (1024 * 1024)
-    print(f"\n最终视频: {final}  ({size_mb:.2f} MB)")
+    print(f"\n최종 영상: {final}  ({size_mb:.2f} MB)")
     print("=" * 56)
     print(f"OUTPUT={final}")
     return 0

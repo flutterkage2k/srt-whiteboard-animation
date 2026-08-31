@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-流式笔迹动画 - 环境引导脚本
+연속 펜선 애니메이션 - 환경 준비 스크립트
 
-职责：
-  1. 在 skill 目录下建立隔离的 Python 虚拟环境（已存在则复用）
-  2. 核对运行所需的第三方库是否可导入
-  3. 自动补齐缺失的库
-  4. 末行打印 ENV_PY=<解释器路径>，供上层调用方捕获
+하는 일:
+  1. 이 폴더 안에 격리된 파이썬 가상환경을 만든다 (이미 있으면 재사용)
+  2. 실행에 필요한 외부 라이브러리를 불러올 수 있는지 확인한다
+  3. 없는 라이브러리를 자동으로 설치한다
+  4. 마지막 줄에 ENV_PY=<파이썬 경로> 를 찍어 호출하는 쪽이 받아 쓰게 한다
 
-用法：
-  python prepare_env.py          # 建环境 + 补依赖，输出 ENV_PY
-  python prepare_env.py --check  # 仅探测，缺东西就以非零码退出
+사용법:
+  python prepare_env.py          # 환경 생성 + 의존성 설치, ENV_PY 출력
+  python prepare_env.py --check  # 확인만. 빠진 게 있으면 0 이 아닌 코드로 종료
 """
 from __future__ import annotations
 
@@ -20,21 +20,21 @@ import sys
 import venv
 from pathlib import Path
 
-# skill 根目录 = 本脚本向上两级
+# 스킬 루트 = 이 스크립트의 두 단계 위
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 VENV_ROOT = SKILL_ROOT / ".venv"
 
-# 解释器导入名 -> pip 安装名
+# 파이썬 import 이름 -> pip 설치 이름
 DEPS: dict[str, str] = {
     "cv2": "opencv-python",
     "numpy": "numpy",
-    "av": "av",  # PyAV：纯 pip 安装的 H.264 编码，无需系统 ffmpeg
-    "PIL": "Pillow",  # render_annotation_preview.py 画区域编号预览图（含中文标签）
+    "av": "av",  # PyAV: pip 만으로 되는 H.264 인코딩. 시스템 ffmpeg 불필요
+    "PIL": "Pillow",  # render_annotation_preview.py 가 영역 번호 확인 그림을 그릴 때 쓴다
 }
 
 
 def interpreter_path() -> Path:
-    """虚拟环境里的 python 可执行文件位置（跨平台）。"""
+    """가상환경 안의 python 실행 파일 위치 (OS 공통)."""
     if sys.platform.startswith("win"):
         return VENV_ROOT / "Scripts" / "python.exe"
     return VENV_ROOT / "bin" / "python"
@@ -43,16 +43,16 @@ def interpreter_path() -> Path:
 def ensure_venv(check_only: bool) -> Path:
     py = interpreter_path()
     if VENV_ROOT.exists() and py.exists():
-        print(f"[ok] 复用现有虚拟环境: {VENV_ROOT}")
+        print(f"[ok] 기존 가상환경 재사용: {VENV_ROOT}")
         return py
 
     if check_only:
-        print(f"[err] 虚拟环境尚未建立: {VENV_ROOT}")
+        print(f"[err] 가상환경이 아직 없습니다: {VENV_ROOT}")
         sys.exit(1)
 
-    print(f"[..] 建立虚拟环境: {VENV_ROOT}")
+    print(f"[..] 가상환경 생성: {VENV_ROOT}")
     venv.create(str(VENV_ROOT), with_pip=True)
-    print("[ok] 虚拟环境就绪")
+    print("[ok] 가상환경 준비 완료")
     return py
 
 
@@ -67,16 +67,16 @@ def can_import(py: Path, import_name: str) -> bool:
 def install(py: Path, packages: list[str]) -> bool:
     if not packages:
         return True
-    print(f"[..] 安装依赖: {', '.join(packages)}")
+    print(f"[..] 의존성 설치: {', '.join(packages)}")
     res = subprocess.run(
         [str(py), "-m", "pip", "install", "--quiet", *packages],
         capture_output=True,
         text=True,
     )
     if res.returncode != 0:
-        print(f"[err] 安装失败:\n{res.stderr}")
+        print(f"[err] 설치 실패:\n{res.stderr}")
         return False
-    print("[ok] 依赖安装完成")
+    print("[ok] 의존성 설치 완료")
     return True
 
 
@@ -95,12 +95,12 @@ def main() -> None:
 
     if missing:
         if check_only:
-            print(f"\n缺 {len(missing)} 个依赖: {', '.join(missing)}")
+            print(f"\n의존성 {len(missing)} 개 부족: {', '.join(missing)}")
             sys.exit(1)
         if not install(py, missing):
             sys.exit(1)
 
-    # 末行：供调用方捕获的约定输出
+    # 마지막 줄: 호출하는 쪽이 받아 쓰는 약속된 출력
     print(f"\nENV_PY={py}")
 
 

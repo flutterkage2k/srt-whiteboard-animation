@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-多幕合并：把各场景的白板动画 MP4 按顺序硬切拼接成一条完整视频。
+여러 장면 병합: 각 장면의 화이트보드 애니메이션 MP4 를 순서대로 이어 붙여 한 편으로 만든다.
 
-优先用系统 ffmpeg 无损拼接（-c copy，不重编码）；各片尺寸/编码不一致或无
-ffmpeg 时，回退到 PyAV 逐帧重编码并缩放补边到第一段尺寸。单片仍保留。
+시스템 ffmpeg 무손실 병합(-c copy, 재인코딩 없음)을 우선 쓴다. 조각마다 크기·코덱이 다르거나
+ffmpeg 이 없으면 PyAV 로 다시 인코딩하고 첫 조각 크기에 맞춰 여백을 채운다. 개별 조각은 남긴다.
 
-用法：
+사용법:
   <ENV_PY> merge_scenes.py --inputs a.mp4 b.mp4 c.mp4 --output final.mp4
 """
 from __future__ import annotations
@@ -33,9 +33,9 @@ def _ffmpeg_concat_copy(inputs: list[Path], output: Path) -> bool:
             capture_output=True, text=True,
         )
         if res.returncode == 0:
-            print(f"  ffmpeg 无损拼接完成: {output}")
+            print(f"  ffmpeg 무손실 병합 완료: {output}")
             return True
-        print(f"  [warn] ffmpeg -c copy 失败，尝试重编码: {res.stderr.strip()[:200]}")
+        print(f"  [warn] ffmpeg -c copy 실패, 재인코딩으로 재시도: {res.stderr.strip()[:200]}")
         res = subprocess.run(
             [ffmpeg, "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
              "-i", str(list_path), "-c:v", "libx264", "-crf", "20",
@@ -43,9 +43,9 @@ def _ffmpeg_concat_copy(inputs: list[Path], output: Path) -> bool:
             capture_output=True, text=True,
         )
         if res.returncode == 0:
-            print(f"  ffmpeg 重编码拼接完成: {output}")
+            print(f"  ffmpeg 재인코딩 병합 완료: {output}")
             return True
-        print(f"  [warn] ffmpeg 重编码也失败: {res.stderr.strip()[:200]}")
+        print(f"  [warn] ffmpeg 재인코딩도 실패: {res.stderr.strip()[:200]}")
         return False
     finally:
         list_path.unlink(missing_ok=True)
@@ -79,20 +79,20 @@ def _pyav_concat(inputs: list[Path], output: Path) -> bool:
     for pkt in ostream.encode(None):
         out.mux(pkt)
     out.close()
-    print(f"  PyAV 拼接完成: {output}")
+    print(f"  PyAV 병합 완료: {output}")
     return True
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description="按顺序合并多幕白板动画 MP4")
-    p.add_argument("--inputs", nargs="+", required=True, help="按播放顺序的 MP4 列表")
-    p.add_argument("--output", required=True, help="合并输出路径")
+    p = argparse.ArgumentParser(description="화이트보드 애니메이션 MP4 를 순서대로 병합")
+    p.add_argument("--inputs", nargs="+", required=True, help="재생 순서대로 나열한 MP4 목록")
+    p.add_argument("--output", required=True, help="병합 결과를 저장할 경로")
     args = p.parse_args(argv)
 
     inputs = [Path(x) for x in args.inputs]
     missing = [str(x) for x in inputs if not x.exists()]
     if missing:
-        print(f"[err] 缺少输入文件: {', '.join(missing)}", file=sys.stderr)
+        print(f"[err] 입력 파일이 없습니다: {', '.join(missing)}", file=sys.stderr)
         return 1
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -100,7 +100,7 @@ def main(argv=None) -> int:
     if _ffmpeg_concat_copy(inputs, output) or _pyav_concat(inputs, output):
         print(f"OUTPUT={output.resolve()}")
         return 0
-    print("[err] 合并失败：系统无 ffmpeg 且 PyAV 不可用", file=sys.stderr)
+    print("[err] 병합 실패: ffmpeg 도 없고 PyAV 도 쓸 수 없습니다", file=sys.stderr)
     return 1
 
 
